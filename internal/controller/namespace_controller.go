@@ -46,9 +46,14 @@ type NamespaceReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var ns corev1.Namespace
+	if err := r.Get(ctx, req.NamespacedName, &ns); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	log.Info("reconciling namespace", "name", ns.Name, "phase", ns.Status.Phase)
 
 	return ctrl.Result{}, nil
 }
