@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,7 +45,8 @@ var protectedNamespaces = map[string]struct{}{
 // NamespaceReconciler reconciles a Namespace object
 type NamespaceReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 
 	// Now returns the current time. Left nil in production; tests set it to a
 	// fixed clock so expiry and requeue durations are exactly assertable.
@@ -59,6 +61,7 @@ func (r *NamespaceReconciler) now() time.Time {
 }
 
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile deletes a namespace once its TTL annotation has elapsed, measured
 // from the namespace's creation timestamp. Namespaces without the annotation
@@ -87,6 +90,8 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if _, protected := protectedNamespaces[ns.Name]; protected {
 		log.Info("refusing to expire protected namespace", "ttl", value)
+		r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "ProtectedNamespace",
+			"Refusing to expire protected namespace after %s", value)
 		return ctrl.Result{}, nil
 	}
 
@@ -97,11 +102,17 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		log.Error(err, "ignoring namespace: malformed TTL annotation",
 			"annotation", ttlAnnotation, "value", value)
+		invalidTTLs.Inc()
+		r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "InvalidTTL",
+			"Ignoring namespace: %s is not a valid duration: %q", ttlAnnotation, value)
 		return ctrl.Result{}, nil
 	}
 	if ttl <= 0 {
 		log.Info("ignoring namespace: TTL annotation must be positive",
 			"annotation", ttlAnnotation, "value", value)
+		invalidTTLs.Inc()
+		r.Recorder.Eventf(&ns, corev1.EventTypeWarning, "InvalidTTL",
+			"Ignoring namespace: %s must be a positive duration, got %q", ttlAnnotation, value)
 		return ctrl.Result{}, nil
 	}
 
@@ -115,6 +126,11 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Delete(ctx, &ns); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	namespacesDeleted.Inc()
+	// Namespaces are cluster scoped, so their events live in the default
+	// namespace and outlive the namespace this one describes.
+	r.Recorder.Eventf(&ns, corev1.EventTypeNormal, "Expired",
+		"Deleting namespace: TTL of %s elapsed at %s", ttl, deadline.Format(time.RFC3339))
 
 	return ctrl.Result{}, nil
 }

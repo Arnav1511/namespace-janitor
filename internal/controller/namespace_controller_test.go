@@ -23,9 +23,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -53,16 +55,33 @@ func createNamespace(annotations map[string]string) *corev1.Namespace {
 	return ns
 }
 
+// recorder captures the events emitted by the most recent reconcileAt call.
+var recorder *record.FakeRecorder
+
 // reconcileAt runs a single reconcile with the clock pinned to now.
 func reconcileAt(name string, now time.Time) (ctrl.Result, error) {
 	GinkgoHelper()
 
+	recorder = record.NewFakeRecorder(10)
 	r := &NamespaceReconciler{
-		Client: k8sClient,
-		Scheme: k8sClient.Scheme(),
-		Now:    func() time.Time { return now },
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		Recorder: recorder,
+		Now:      func() time.Time { return now },
 	}
 	return r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name}})
+}
+
+// emittedEvents drains whatever the last reconcile recorded.
+func emittedEvents() []string {
+	GinkgoHelper()
+
+	close(recorder.Events)
+	var out []string
+	for e := range recorder.Events {
+		out = append(out, e)
+	}
+	return out
 }
 
 func getNamespace(name string) *corev1.Namespace {
@@ -83,6 +102,8 @@ type ttlCase struct {
 	wantRequeue time.Duration
 	// wantDeleted is whether the namespace should be terminating afterwards.
 	wantDeleted bool
+	// wantEvents are substrings expected in the emitted events, in order.
+	wantEvents []string
 }
 
 var _ = Describe("Namespace Controller", func() {
@@ -98,17 +119,25 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(tc.wantRequeue))
 			Expect(getNamespace(ns.Name).DeletionTimestamp.IsZero()).To(Equal(!tc.wantDeleted))
+
+			events := emittedEvents()
+			Expect(events).To(HaveLen(len(tc.wantEvents)))
+			for i, want := range tc.wantEvents {
+				Expect(events[i]).To(ContainSubstring(want))
+			}
 		},
 
 		Entry("deletes a namespace whose TTL has elapsed", ttlCase{
 			annotations: map[string]string{ttlAnnotation: "1h"},
 			elapsed:     90 * time.Minute,
 			wantDeleted: true,
+			wantEvents:  []string{"Normal Expired Deleting namespace: TTL of 1h0m0s elapsed"},
 		}),
 		Entry("deletes a namespace exactly on its deadline", ttlCase{
 			annotations: map[string]string{ttlAnnotation: "1h"},
 			elapsed:     time.Hour,
 			wantDeleted: true,
+			wantEvents:  []string{"Normal Expired Deleting namespace"},
 		}),
 		Entry("requeues for the remaining TTL when not yet expired", ttlCase{
 			annotations: map[string]string{ttlAnnotation: "2h"},
@@ -126,10 +155,12 @@ var _ = Describe("Namespace Controller", func() {
 		Entry("ignores a namespace with a malformed TTL annotation", ttlCase{
 			annotations: map[string]string{ttlAnnotation: "two hours"},
 			elapsed:     30 * 24 * time.Hour,
+			wantEvents:  []string{`Warning InvalidTTL Ignoring namespace: janitor.arnavranjan.com/ttl is not a valid duration: "two hours"`},
 		}),
 		Entry("ignores a namespace with a non-positive TTL annotation", ttlCase{
 			annotations: map[string]string{ttlAnnotation: "-5m"},
 			elapsed:     30 * 24 * time.Hour,
+			wantEvents:  []string{`Warning InvalidTTL Ignoring namespace: janitor.arnavranjan.com/ttl must be a positive duration, got "-5m"`},
 		}),
 		// Without the terminating guard this would requeue for the remaining 90m,
 		// so a zero requeue is what proves the guard fired.
@@ -161,6 +192,24 @@ var _ = Describe("Namespace Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(ctrl.Result{}))
 		Expect(getNamespace(name).DeletionTimestamp.IsZero()).To(BeTrue())
+		Expect(emittedEvents()).To(ConsistOf(
+			ContainSubstring("Warning ProtectedNamespace Refusing to expire protected namespace after 1s")))
+	})
+
+	It("counts deletions and invalid TTLs", func() {
+		deleted := testutil.ToFloat64(namespacesDeleted)
+		invalid := testutil.ToFloat64(invalidTTLs)
+
+		expired := createNamespace(map[string]string{ttlAnnotation: "1h"})
+		_, err := reconcileAt(expired.Name, expired.CreationTimestamp.Add(2*time.Hour))
+		Expect(err).NotTo(HaveOccurred())
+
+		bad := createNamespace(map[string]string{ttlAnnotation: "nope"})
+		_, err = reconcileAt(bad.Name, bad.CreationTimestamp.Time)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(testutil.ToFloat64(namespacesDeleted)).To(Equal(deleted + 1))
+		Expect(testutil.ToFloat64(invalidTTLs)).To(Equal(invalid + 1))
 	})
 
 	It("ignores a namespace that no longer exists", func() {

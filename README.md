@@ -59,7 +59,46 @@ control plane's workloads.
 ### RBAC
 
 The controller only ever reads and deletes namespaces, so its ClusterRole
-grants `get`, `list`, `watch` and `delete` on `namespaces` and nothing else.
+grants `get`, `list`, `watch` and `delete` on `namespaces`, plus `create` and
+`patch` on `events` so it can report what it did.
+
+## Observability
+
+### Events
+
+The controller emits Kubernetes events alongside its logs:
+
+| Reason | Type | When |
+| --- | --- | --- |
+| `Expired` | Normal | A namespace was deleted because its TTL elapsed |
+| `InvalidTTL` | Warning | The annotation did not parse, or was zero or negative |
+| `ProtectedNamespace` | Warning | A protected namespace carried a TTL annotation |
+
+Namespaces are cluster scoped, so their events are written to the `default`
+namespace rather than to the namespace they describe. Two consequences worth
+knowing: `kubectl describe ns` does **not** show them — its describer renders
+quota and limit ranges instead of an events section — and an `Expired` event
+outlives the namespace it refers to, which is what makes it usable as an audit
+trail. Read them with:
+
+```sh
+kubectl get events -n default --field-selector reason=Expired
+kubectl get events -A --field-selector involvedObject.name=preview-1234
+```
+
+### Metrics
+
+Two counters are registered on controller-runtime's metrics registry and
+served from the manager's metrics endpoint:
+
+| Metric | Meaning |
+| --- | --- |
+| `namespace_janitor_deleted_total` | Namespaces deleted because their TTL elapsed |
+| `namespace_janitor_invalid_ttl_total` | Reconciles that saw a malformed or non-positive TTL |
+
+Both are deliberately unlabelled. Namespace names are unbounded and
+short-lived, so using one as a label would grow series cardinality without
+bound.
 
 ## Tuning
 
@@ -91,9 +130,7 @@ Two related notes:
 - [x] Expiry check and deletion
 - [x] Requeue on remaining TTL
 - [x] envtest coverage
-
-Possible next steps: emit a Kubernetes `Event` on a malformed annotation so
-`kubectl describe ns` surfaces it, and export a metric for namespaces reaped.
+- [x] Events and Prometheus metrics
 
 ## Running locally
 
