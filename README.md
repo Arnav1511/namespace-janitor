@@ -26,22 +26,56 @@ adds the TTL, and compares against now. If the deadline has passed the
 namespace is deleted. If it has not, the controller requeues itself for the
 remaining duration rather than polling.
 
-Namespaces without the annotation are ignored.
+The requeue is an optimisation, not a correctness mechanism. The deadline is
+derived entirely from the namespace's own `creationTimestamp` and annotation,
+so the controller keeps no state of its own: if it restarts, the informer's
+initial list reconciles every namespace again and each deadline is recomputed
+from scratch. Nothing drifts and nothing is missed.
+
+The TTL value is parsed with
+[`time.ParseDuration`](https://pkg.go.dev/time#ParseDuration), so `"90m"`,
+`"2h"` and `"36h"` are all valid. Note that days are not a unit — use `"24h"`
+rather than `"1d"`.
+
+### What is ignored
+
+A namespace is left alone when it:
+
+- has no `janitor.arnavranjan.com/ttl` annotation,
+- is already terminating,
+- has a TTL that does not parse, or that is zero or negative, or
+- is one of `default`, `kube-system`, `kube-public` or `kube-node-lease`.
+
+A malformed TTL is logged and otherwise ignored rather than retried. It is a
+user error, not a transient failure, so requeueing would retry the same bad
+value under backoff indefinitely; correcting the annotation triggers a fresh
+reconcile through the watch anyway.
+
+The four protected namespaces are never deleted even when explicitly
+annotated. The annotation is not a strong enough signal to justify that blast
+radius — a mistyped `kubectl annotate` should not be able to take out the
+control plane's workloads.
+
+### RBAC
+
+The controller only ever reads and deletes namespaces, so its ClusterRole
+grants `get`, `list`, `watch` and `delete` on `namespaces` and nothing else.
 
 ## Status
 
-Work in progress.
-
 - [x] Project scaffold and controller registration
-- [ ] Reconcile loop: fetch namespace and log
-- [ ] TTL annotation parsing
-- [ ] Expiry check and deletion
-- [ ] Requeue on remaining TTL
-- [ ] envtest coverage
+- [x] Reconcile loop: fetch namespace and log
+- [x] TTL annotation parsing
+- [x] Expiry check and deletion
+- [x] Requeue on remaining TTL
+- [x] envtest coverage
+
+Possible next steps: emit a Kubernetes `Event` on a malformed annotation so
+`kubectl describe ns` surfaces it, and export a metric for namespaces reaped.
 
 ## Running locally
 
-Requires Go 1.24+, Docker, kind and kubectl.
+Requires Go 1.26+, Docker, kind and kubectl.
 
 ```sh
 kind create cluster --name janitor
@@ -49,11 +83,29 @@ make run
 ```
 
 The controller runs as a local process against your current kubeconfig
-context. In a second terminal, create a namespace and watch the logs:
+context. There are no CRDs, so `make install` is not needed.
+
+In a second terminal, create a namespace that expires in a minute:
 
 ```sh
-kubectl create ns test-1
+kubectl create ns demo-expiring
+kubectl annotate ns demo-expiring janitor.arnavranjan.com/ttl=1m
 ```
+
+The controller logs the remaining lifetime, requeues, and deletes the
+namespace once the minute is up. A namespace created without the annotation
+is ignored indefinitely.
+
+## Tests
+
+```sh
+make test
+```
+
+Unit tests run against [envtest](https://book.kubebuilder.io/reference/envtest),
+which starts a real apiserver and etcd. Note that envtest runs no namespace
+lifecycle controller, so a deleted namespace stays `Terminating` rather than
+disappearing; the tests assert on the deletion timestamp accordingly.
 
 ## Licence
 

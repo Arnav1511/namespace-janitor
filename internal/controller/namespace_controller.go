@@ -86,7 +86,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if _, protected := protectedNamespaces[ns.Name]; protected {
-		log.Info("refusing to expire protected namespace", "namespace", ns.Name, "ttl", value)
+		log.Info("refusing to expire protected namespace", "ttl", value)
 		return ctrl.Result{}, nil
 	}
 
@@ -96,24 +96,22 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	ttl, err := time.ParseDuration(value)
 	if err != nil {
 		log.Error(err, "ignoring namespace: malformed TTL annotation",
-			"namespace", ns.Name, "annotation", ttlAnnotation, "value", value)
+			"annotation", ttlAnnotation, "value", value)
 		return ctrl.Result{}, nil
 	}
 	if ttl <= 0 {
 		log.Info("ignoring namespace: TTL annotation must be positive",
-			"namespace", ns.Name, "annotation", ttlAnnotation, "value", value)
+			"annotation", ttlAnnotation, "value", value)
 		return ctrl.Result{}, nil
 	}
 
 	deadline := ns.CreationTimestamp.Add(ttl)
 	if remaining := deadline.Sub(r.now()); remaining > 0 {
-		log.Info("namespace not yet expired, requeueing",
-			"namespace", ns.Name, "ttl", ttl, "remaining", remaining)
+		log.Info("namespace not yet expired, requeueing", "ttl", ttl, "remaining", remaining)
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
-	log.Info("TTL expired, deleting namespace",
-		"namespace", ns.Name, "ttl", ttl, "createdAt", ns.CreationTimestamp.Time)
+	log.Info("TTL expired, deleting namespace", "ttl", ttl, "createdAt", ns.CreationTimestamp.Time)
 	if err := r.Delete(ctx, &ns); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
