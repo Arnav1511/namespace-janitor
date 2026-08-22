@@ -61,6 +61,28 @@ control plane's workloads.
 The controller only ever reads and deletes namespaces, so its ClusterRole
 grants `get`, `list`, `watch` and `delete` on `namespaces` and nothing else.
 
+## Tuning
+
+The cache's `SyncPeriod` is left at controller-runtime's 10 hour default,
+deliberately. The periodic resync is insurance against a bug that leaves an
+object un-requeued; it is not a cache freshness mechanism, since it replays
+the local cache as synthetic update events rather than re-listing from the
+apiserver. Upstream's guidance is that if you want insurance against missed
+events you should requeue rather than shorten the period — which is already
+how this controller works. Shortening it would re-reconcile every namespace in
+the cluster on a fixed interval, reintroducing exactly the polling the design
+avoids.
+
+Two related notes:
+
+- Do not add `predicate.GenerationChangedPredicate` to the watch. Namespaces
+  carry no `metadata.generation` at all, so the predicate would compare unset
+  against unset, find no change, and filter out every update event — including
+  the annotation edits this controller exists to react to, and the resync
+  described above.
+- Leader election is wired up but off by default. Turn it on before running
+  more than one replica.
+
 ## Status
 
 - [x] Project scaffold and controller registration
